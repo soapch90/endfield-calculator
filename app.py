@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import os
+import ast
 import math
 
 # ---------------------- 1. 初始化会话状态 ----------------------
@@ -9,128 +10,121 @@ if "show_result" not in st.session_state:
 if "result" not in st.session_state:
     st.session_state.result = {}
 
-# ---------------------- 2. 读取电力表 ----------------------
+# ---------------------- 2. 读取Excel文件并构建映射 ----------------------
 excel_file_path = "终末地产品.xlsx"
-power_dict = {}
+product_info = {}  # 存储所有产物的生产信息
+power_dict = {}    # 存储机器电力数据
+
 try:
     if os.path.exists(excel_file_path):
+        # 1. 读取产物表并构建映射
+        df_product = pd.read_excel(excel_file_path, sheet_name="产物")
+        for idx, row in df_product.iterrows():
+            product_name = row["产物"]
+            if pd.notna(row["机器"]) and pd.notna(row["时间"]):
+                # 解析机器和材料信息
+                def parse_dict(s):
+                    if pd.notna(s):
+                        try:
+                            lst = ast.literal_eval(s)
+                            return lst
+                        except:
+                            return {}
+                    return {}
+                
+                machine = parse_dict(row["机器"])
+                if isinstance(machine, list) and len(machine) > 0:
+                    machine = machine[0]
+                
+                materials = parse_dict(row["材料"]) if pd.notna(row["材料"]) else []
+                
+                product_info[product_name] = {
+                    "time_per_unit": row["时间"],
+                    "machine": machine,
+                    "materials": materials
+                }
+        
+        # 2. 读取电力表
         df_power = pd.read_excel(excel_file_path, sheet_name="电力表")
         power_dict = df_power.set_index("机器")["电力"].to_dict()
     else:
-        power_dict = {
-            "封装机": 50,
-            "配件机": 40,
-            "精炼炉": 60,
-            "粉碎机": 30
-        }
+        st.error(f"未找到Excel文件：{excel_file_path}")
 except Exception as e:
-    st.warning(f"读取电力表失败，使用默认电力数据：{e}")
-    power_dict = {
-        "封装机": 50,
-        "配件机": 40,
-        "精炼炉": 60,
-        "粉碎机": 30
-    }
+    st.error(f"读取Excel失败：{e}")
 
-# ---------------------- 3. 计算函数 ----------------------
-# 中容谷地电池
-def calculate_battery_chain(target_output):
-    time_per_battery = 10
-    single_battery_cap = 60 / time_per_battery
-    required_packager = math.ceil(target_output / single_battery_cap)
-    actual_battery = required_packager * single_battery_cap
-
-    iron_part_need = actual_battery * 10
-    dust_need = actual_battery * 15
-
-    time_per_iron = 2
-    single_iron_cap = 60 / time_per_iron
-    required_fitter = math.ceil(iron_part_need / single_iron_cap)
-    iron_ingot_need = actual_battery * 10
-
-    time_per_ingot = 2
-    single_ingot_cap = 60 / time_per_ingot
-    required_refiner = math.ceil(iron_ingot_need / single_ingot_cap)
-    iron_ore_need = actual_battery * 10
-
-    time_per_dust = 2
-    single_dust_cap = 60 / time_per_dust
-    required_crusher = math.ceil(dust_need / single_dust_cap)
-    ore_need = actual_battery * 15
-
-    machines = {
-        "封装机": required_packager,
-        "配件机": required_fitter,
-        "精炼炉": required_refiner,
-        "粉碎机": required_crusher
-    }
-
+# ---------------------- 3. 递归计算全链消耗 ----------------------
+def calculate_full_chain(product_name, target_output):
+    total_machines = {}
+    total_materials = {}
     total_power = 0
-    for machine, qty in machines.items():
-        total_power += qty * power_dict.get(machine, 0)
 
-    materials = {
-        "蓝铁矿": iron_ore_need,
-        "源矿": ore_need
-    }
+    def recursive_calculate(current_product, required_output):
+        nonlocal total_machines, total_materials, total_power
+        
+        # 如果是原始材料（不在product_info中）
+        if current_product not in product_info:
+            total_materials[current_product] = total_materials.get(current_product, 0) + required_output
+            return
+        
+        # 获取当前产物的生产参数
+        info = product_info[current_product]
+        time_per_unit = info["time_per_unit"]
+        machine = info["machine"]
+        materials = info["materials"]
 
-    overflow = actual_battery - target_output
+        # 计算当前产物的产能和机器需求
+        single_capacity = 60 / time_per_unit
+        required_machines = math.ceil(required_output / single_capacity)
+        actual_capacity = required_machines * single_capacity
+
+        # 累计机器和电力
+        machine_name = machine.get("机器", "未知机器")
+        machine_qty = machine.get("数量", 1) * required_machines
+        total_machines[machine_name] = total_machines.get(machine_name, 0) + machine_qty
+        total_power += machine_qty * power_dict.get(machine_name, 0)
+
+        # 递归计算上游材料（确保遍历所有材料分支）
+        for mat in materials:
+            if isinstance(mat, dict) and "材料" in mat and "数量" in mat:
+                mat_name = mat["材料"]
+                mat_qty = mat["数量"]
+                mat_total = actual_capacity * mat_qty
+                recursive_calculate(mat_name, mat_total)
+    
+    # 启动递归计算
+    recursive_calculate(product_name, target_output)
+    
+    # 计算当前产物的实际产能和溢出
+    info = product_info[product_name]
+    time_per_unit = info["time_per_unit"]
+    single_capacity = 60 / time_per_unit
+    required_machines = math.ceil(target_output / single_capacity)
+    actual_capacity = required_machines * single_capacity
+    overflow = actual_capacity - target_output
 
     return {
-        "actual": actual_battery,
+        "actual_capacity": actual_capacity,
         "overflow": overflow,
-        "machines": machines,
-        "materials": materials,
-        "total_power": total_power
-    }
-
-# 铁制零件
-def calculate_iron_part_chain(target_output):
-    time_per_part = 2
-    single_part_cap = 60 / time_per_part
-    required_fitter = math.ceil(target_output / single_part_cap)
-    actual_part = required_fitter * single_part_cap
-
-    iron_ingot_need = actual_part * 1
-    time_per_ingot = 2
-    single_ingot_cap = 60 / time_per_ingot
-    required_refiner = math.ceil(iron_ingot_need / single_ingot_cap)
-    iron_ore_need = actual_part * 1
-
-    machines = {
-        "配件机": required_fitter,
-        "精炼炉": required_refiner
-    }
-
-    total_power = 0
-    for machine, qty in machines.items():
-        total_power += qty * power_dict.get(machine, 0)
-
-    materials = {
-        "蓝铁矿": iron_ore_need
-    }
-
-    overflow = actual_part - target_output
-
-    return {
-        "actual": actual_part,
-        "overflow": overflow,
-        "machines": machines,
-        "materials": materials,
+        "machines": total_machines,
+        "materials": total_materials,
         "total_power": total_power
     }
 
 # ---------------------- 4. 页面交互逻辑 ----------------------
 st.title("终末地量化计算器")
 
-# 产物选择（恢复空初始化 + placeholder提示）
-product_list = ["中容谷地电池", "铁制零件", "源石粉末", "蓝铁块"]
-selected_product = st.selectbox(
-    "选择要生产的产物", 
-    product_list, 
-    index=None,  # 关键：初始化为空
-    placeholder="请选择要生产的产物"  # 提示文案
-)
+# 产物选择（自动读取Excel中的可生产产物）
+if product_info:
+    product_list = list(product_info.keys())
+    selected_product = st.selectbox(
+        "选择要生产的产物", 
+        product_list, 
+        index=None,
+        placeholder="请选择要生产的产物"
+    )
+else:
+    st.warning("未读取到有效的产物信息，请检查Excel文件。")
+    st.stop()
 
 # 产量输入
 target_output = st.number_input(
@@ -140,27 +134,24 @@ target_output = st.number_input(
     step=1
 )
 
-# 计算按钮逻辑
+# 计算按钮
 if st.button("开始计算", type="primary"):
-    # 先判断是否选择了产物
     if selected_product is None:
-        st.warning("请先从下拉框选择要生产的产物！")
+        st.warning("请先选择要生产的产物！")
         st.stop()
     
-    # 根据选择的产物计算
-    if selected_product == "中容谷地电池":
-        result = calculate_battery_chain(target_output)
-    elif selected_product == "铁制零件":
-        result = calculate_iron_part_chain(target_output)
-    else:
-        st.warning(f"「{selected_product}」的计算逻辑尚未添加，目前仅支持中容谷地电池和铁制零件。")
+    if selected_product not in product_info:
+        st.warning(f"「{selected_product}」的生产信息未找到，请检查Excel表。")
         st.stop()
-
+    
+    # 执行自动化递归计算
+    result = calculate_full_chain(selected_product, target_output)
+    
     # 存储结果
     st.session_state.result = {
         "product": selected_product,
         "target_output": target_output,
-        "actual_total_capacity": result["actual"],
+        "actual_total_capacity": result["actual_capacity"],
         "overflow_output": result["overflow"],
         "total_power": result["total_power"],
         "full_machines": result["machines"],
