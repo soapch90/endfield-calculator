@@ -42,15 +42,22 @@ if not st.session_state.show_result:
     if st.button("开始计算", type="primary"):
         product_info = df[df["产物"] == selected_product].iloc[0]
         
+        # 处理时间为空的情况
+        if pd.isna(product_info["时间"]):
+            st.error(f"产物「{selected_product}」的生产时间为空，无法计算！请检查Excel数据")
+            st.stop()
+        
         # 解析机器和材料的字典格式
         machine_dict = ast.literal_eval(product_info["机器"]) if pd.notna(product_info["机器"]) else {}
         material_dict = ast.literal_eval(product_info["材料"]) if pd.notna(product_info["材料"]) else {}
         
-        # 计算逻辑（适配你的Excel字段：时间、产量）
-        production_time = product_info["时间"]  # 生产1个的时间（分钟）
-        single_machine_output = 1 / production_time  # 单台机器每分钟产量
+        # 计算逻辑
+        production_time = product_info["时间"]
+        single_machine_output = 1 / production_time
         machine_count = target_output / single_machine_output
-        actual_machine = int(machine_count) if machine_count.is_integer() else int(machine_count) + 1
+        # 用 math.ceil 安全向上取整，避免 NaN 问题
+        import math
+        actual_machine = math.ceil(machine_count)
         actual_total_output = actual_machine * single_machine_output
         overflow_output = actual_total_output - target_output
         
